@@ -234,3 +234,34 @@ This is for educational and research purposes only. Past performance does not gu
 - **plotly**: Interactive charting library
 
 Install with: `uv sync`
+
+## 🌍 Hosting Your Dashboard
+
+### 🚀 **Easy Deployment (Recommended)**
+
+**Streamlit Community Cloud - FREE:**
+1. Push your code to GitHub
+2. Go to [share.streamlit.io](https://share.streamlit.io)
+3. Connect your repository
+4. Set main file: `streamlit_app.py`
+5. Deploy!
+
+Your dashboard will be live at: `https://yourname-crypto-trading-streamlit-app-xyz.streamlit.app`
+
+### 📋 **Deployment Preparation**
+
+Check if you're ready to deploy:
+```bash
+python3 prepare_deploy.py
+```
+
+This will verify all files are present and provide deployment guidance.
+
+### 🐳 **Other Hosting Options**
+
+- **Railway**: $5/month, more resources and custom domains
+- **Heroku**: Free tier available, easy scaling
+- **Docker + VPS**: Full control, custom server specs
+- **GitHub Codespaces**: Quick testing and sharing
+
+See `deploy_guide.md` for detailed instructions for each option.
