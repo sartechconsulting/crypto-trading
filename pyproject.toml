@@ -1,0 +1,13 @@
+[project]
+name = "crypto-trading"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "polars>=1.32.3",
+    "numpy>=1.24.0",
+    "matplotlib>=3.7.0",
+    "streamlit>=1.28.0",
+    "plotly>=5.17.0",
+]
