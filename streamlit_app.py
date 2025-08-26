@@ -73,17 +73,24 @@ class GridTradingStrategy:
     def __init__(self, config: GridTradingConfig, starting_price: float = None):
         self.config = config
         
-        # Calculate initial portfolio value including ETH holdings
-        initial_asset_value = 0.0
-        if config.initial_asset_holdings > 0 and starting_price:
-            initial_asset_value = config.initial_asset_holdings * starting_price
+        # Calculate initial asset holdings based on target allocation
+        if starting_price and starting_price > 0:
+            # Calculate how much of the initial capital should be in the asset
+            target_asset_value = config.initial_capital * config.target_allocation
+            initial_asset_holdings = target_asset_value / starting_price
+            initial_cash = config.initial_capital - target_asset_value
+        else:
+            # Fallback if no starting price
+            initial_asset_holdings = 0.0
+            initial_cash = config.initial_capital
         
-        total_initial_value = config.initial_capital + initial_asset_value
+        # Store calculated initial holdings in config for reference
+        self.config.initial_asset_holdings = initial_asset_holdings
         
         self.state = TradingState(
-            cash=config.initial_capital,
-            asset_holdings=config.initial_asset_holdings,
-            total_value=total_initial_value,
+            cash=initial_cash,
+            asset_holdings=initial_asset_holdings,
+            total_value=config.initial_capital,
             last_price=starting_price or 0.0
         )
         self.trade_history: List[dict] = []
@@ -306,7 +313,7 @@ def load_crypto_data(asset: str = "ETH"):
 # Run backtest
 @st.cache_data
 def run_backtest(
-    asset, initial_capital, initial_asset_holdings, price_range_low, price_range_high,
+    asset, initial_capital, price_range_low, price_range_high,
     num_grids, volatility_threshold, max_position_size, min_position_size,
     target_allocation, rebalance_threshold, transaction_fee,
     start_date, end_date
@@ -315,7 +322,7 @@ def run_backtest(
     config = GridTradingConfig(
         asset=asset,
         initial_capital=initial_capital,
-        initial_asset_holdings=initial_asset_holdings,
+        initial_asset_holdings=0.0,  # Will be calculated in strategy init
         price_range_low=price_range_low,
         price_range_high=price_range_high,
         num_grids=num_grids,
@@ -489,23 +496,35 @@ def main():
         help="Select the cryptocurrency for backtesting"
     )
     
+    # Target Allocation (moved to top)
+    st.sidebar.subheader("⚖️ Target Allocation")
+    target_allocation = st.sidebar.slider(
+        f"Target {selected_asset} Allocation (%)", 
+        min_value=20, max_value=80, value=50, step=5,
+        help=f"Percentage of portfolio value to hold in {selected_asset}"
+    ) / 100.0
+    
     # Dynamic defaults based on asset
     if selected_asset == "BTC":
         default_low, default_high = 30000, 100000
-        default_holdings = 0.1
         asset_name = "Bitcoin"
     else:
         default_low, default_high = 3000, 10000
-        default_holdings = 2.0
         asset_name = "Ethereum"
     
     # Portfolio Settings
     st.sidebar.subheader("💰 Portfolio Settings")
     initial_capital = st.sidebar.number_input(
-        "Initial Cash ($)", min_value=1000, max_value=100000, value=5000, step=1000
+        "Initial Cash ($)", min_value=1000, max_value=100000, value=5000, step=1000,
+        help="Starting cash amount for the strategy"
     )
-    initial_asset_holdings = st.sidebar.number_input(
-        f"Initial {selected_asset} Holdings", min_value=0.0, max_value=50.0, value=default_holdings, step=0.1
+    
+    # Show calculated allocation info
+    st.sidebar.info(
+        f"💡 **Allocation Strategy**\n\n"
+        f"• {target_allocation:.0%} will be allocated to {selected_asset}\n"
+        f"• {(1-target_allocation):.0%} will remain as cash\n"
+        f"• Initial {selected_asset} amount will be calculated from starting price"
     )
     
     # Price Range Settings  
@@ -531,12 +550,8 @@ def main():
         "Min Position Size (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1
     ) / 100.0
     
-    # Allocation Settings
-    st.sidebar.subheader("⚖️ Allocation Settings")
-    target_allocation = st.sidebar.slider(
-        "Target ETH Allocation (%)", min_value=20, max_value=80, value=50, step=5
-    ) / 100.0
-    
+    # Rebalancing Settings
+    st.sidebar.subheader("🔄 Rebalancing Settings")
     rebalance_threshold = st.sidebar.slider(
         "Rebalance Threshold (%)", min_value=5, max_value=25, value=10, step=1
     ) / 100.0
@@ -578,7 +593,7 @@ def main():
         with st.spinner("Running backtest..."):
             try:
                 strategy, metrics, config = run_backtest(
-                    selected_asset, initial_capital, initial_asset_holdings, price_range_low, price_range_high,
+                    selected_asset, initial_capital, price_range_low, price_range_high,
                     num_grids, volatility_threshold, max_position_size, min_position_size,
                     target_allocation, rebalance_threshold, transaction_fee,
                     start_date, end_date
@@ -598,6 +613,33 @@ def main():
         strategy = st.session_state.strategy
         metrics = st.session_state.metrics
         config = st.session_state.config
+        
+        # Show calculated starting allocation
+        st.header("🎯 Starting Allocation")
+        
+        starting_price = strategy.portfolio_history[0]['price'] if strategy.portfolio_history else 0
+        initial_asset_value = config.initial_asset_holdings * starting_price
+        initial_cash_used = config.initial_capital - initial_asset_value
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric(
+                f"Starting {config.asset}", 
+                f"{config.initial_asset_holdings:.4f} {config.asset}",
+                help=f"Calculated from {config.target_allocation:.0%} allocation"
+            )
+        with col2:
+            st.metric(
+                f"Starting {config.asset} Value", 
+                f"${initial_asset_value:,.2f}",
+                help=f"At starting price of ${starting_price:,.2f}"
+            )
+        with col3:
+            st.metric(
+                "Starting Cash", 
+                f"${initial_cash_used:,.2f}",
+                help=f"Remaining cash after {config.asset} purchase"
+            )
         
         # Performance Metrics
         st.header("📊 Performance Summary")
