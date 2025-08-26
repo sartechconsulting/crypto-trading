@@ -568,26 +568,53 @@ def main():
     # Date Range Settings
     st.sidebar.subheader("📅 Date Range")
     
+    # Calculate relative dates
+    from datetime import datetime, timedelta
+    today = datetime.now().date()
+    
     preset_ranges = {
-        "Crypto Winter (2018-2020)": ("2018-01-01", "2020-12-31"),
-        "COVID Bull Run (2020-2022)": ("2020-03-01", "2022-01-01"),
-        "Recent Volatility (2022-2024)": ("2022-01-01", "2024-12-31"),
-        "2022 Bear Market": ("2021-11-01", "2022-12-31"),
-        "Custom": None
+        "Last 6 Months": (today - timedelta(days=180), today),
+        "Last Year": (today - timedelta(days=365), today),
+        "Last 2 Years": (today - timedelta(days=730), today),
+        "Last 3 Years": (today - timedelta(days=1095), today),
+        "COVID Bull Run (2020-2022)": (date(2020, 3, 1), date(2022, 1, 1)),
+        "2022 Bear Market": (date(2021, 11, 1), date(2022, 12, 31)),
+        "Recent Volatility (2022-2024)": (date(2022, 1, 1), date(2024, 12, 31)),
+        "All Available Data": (None, None),
+        "Custom": "custom"
     }
     
     selected_preset = st.sidebar.selectbox(
-        "Date Range Preset", options=list(preset_ranges.keys()), index=2
+        "Date Range Preset", 
+        options=list(preset_ranges.keys()), 
+        index=1,  # Default to "Last Year"
+        help="Choose a preset time period or select Custom for manual dates"
     )
     
-    if preset_ranges[selected_preset]:
-        start_date, end_date = preset_ranges[selected_preset]
-    else:
+    if preset_ranges[selected_preset] == "custom":
+        # Custom date selection
         col1, col2 = st.sidebar.columns(2)
         with col1:
-            start_date = st.date_input("Start Date", value=date(2022, 1, 1)).strftime("%Y-%m-%d")
+            start_date_input = st.date_input("Start Date", value=date(2023, 1, 1))
         with col2:
-            end_date = st.date_input("End Date", value=date(2024, 12, 31)).strftime("%Y-%m-%d")
+            end_date_input = st.date_input("End Date", value=today)
+        start_date = start_date_input.strftime("%Y-%m-%d")
+        end_date = end_date_input.strftime("%Y-%m-%d")
+    elif preset_ranges[selected_preset] == (None, None):
+        # All available data
+        start_date = None
+        end_date = None
+    elif preset_ranges[selected_preset]:
+        # Use preset dates
+        start_date_obj, end_date_obj = preset_ranges[selected_preset]
+        start_date = start_date_obj.strftime("%Y-%m-%d")
+        end_date = end_date_obj.strftime("%Y-%m-%d")
+    
+    # Show selected date range
+    if start_date and end_date:
+        st.sidebar.info(f"📅 **Selected Period:**\n{start_date} to {end_date}")
+    elif not start_date and not end_date:
+        st.sidebar.info("📅 **Selected Period:**\nAll available data")
     
     # Run Strategy Button
     if st.sidebar.button("🚀 Run Strategy", type="primary", use_container_width=True):
