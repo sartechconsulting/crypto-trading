@@ -906,28 +906,53 @@ def main():
         st.header("🎯 Starting Allocation")
         
         starting_price = strategy.portfolio_history[0]['price'] if strategy.portfolio_history else 0
-        initial_asset_value = config.initial_asset_holdings * starting_price
-        initial_cash_used = config.initial_capital - initial_asset_value
         
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric(
-                f"Starting {config.asset}", 
-                f"{config.initial_asset_holdings:.4f} {config.asset}",
-                help=f"Calculated from {config.target_allocation:.0%} allocation"
-            )
-        with col2:
-            st.metric(
-                f"Starting {config.asset} Value", 
-                f"${initial_asset_value:,.2f}",
-                help=f"At starting price of ${starting_price:,.2f}"
-            )
-        with col3:
-            st.metric(
-                "Starting Cash", 
-                f"${initial_cash_used:,.2f}",
-                help=f"Remaining cash after {config.asset} purchase"
-            )
+        # Handle different config types
+        if hasattr(config, 'initial_asset_holdings'):
+            # Rebalancing Strategy
+            initial_asset_value = config.initial_asset_holdings * starting_price
+            initial_cash_used = config.initial_capital - initial_asset_value
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    f"Starting {config.asset}", 
+                    f"{config.initial_asset_holdings:.4f} {config.asset}",
+                    help=f"Calculated from {config.target_allocation:.0%} allocation"
+                )
+            with col2:
+                st.metric(
+                    f"Starting {config.asset} Value", 
+                    f"${initial_asset_value:,.2f}",
+                    help=f"At starting price of ${starting_price:,.2f}"
+                )
+            with col3:
+                st.metric(
+                    "Starting Cash", 
+                    f"${initial_cash_used:,.2f}",
+                    help=f"Remaining cash after {config.asset} purchase"
+                )
+        else:
+            # Grid Trading Strategy
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    f"Starting {config.asset}", 
+                    f"0.0000 {config.asset}",
+                    help="Grid trading starts with 100% cash"
+                )
+            with col2:
+                st.metric(
+                    f"Starting {config.asset} Value", 
+                    f"$0.00",
+                    help="No initial asset allocation"
+                )
+            with col3:
+                st.metric(
+                    "Starting Cash", 
+                    f"${config.initial_capital:,.2f}",
+                    help="All capital starts as cash for grid trading"
+                )
         
         # Performance Metrics
         st.header("📊 Performance Summary")
