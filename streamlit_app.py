@@ -2,7 +2,7 @@
 Streamlit Dashboard for Grid Trading Strategy Analysis
 
 Interactive web app to configure and test grid trading strategies on Ethereum data.
-Run with: streamlit run streamlit_app_fixed.py
+Run with: streamlit run streamlit_app.py
 """
 
 import streamlit as st
