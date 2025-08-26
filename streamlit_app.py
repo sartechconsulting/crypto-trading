@@ -362,14 +362,14 @@ def run_backtest(
     
     total_return = (final_value - initial_value) / initial_value
     
-    # Buy & hold comparison
+    # Buy & hold comparison - convert all initial capital to asset at first price
     first_price = portfolio_df["price"][0]
     last_price = portfolio_df["price"][-1]
-    initial_cash = strategy.config.initial_capital
-    initial_asset = strategy.config.initial_asset_holdings
-    total_eth_if_bought_all = initial_asset + (initial_cash / first_price)
-    buy_hold_final_value = total_eth_if_bought_all * last_price
-    buy_hold_return = (buy_hold_final_value - initial_value) / initial_value
+    initial_total_capital = strategy.config.initial_capital
+    # Buy & hold: all capital invested in asset at starting price
+    buy_hold_asset_amount = initial_total_capital / first_price
+    buy_hold_final_value = buy_hold_asset_amount * last_price
+    buy_hold_return = (buy_hold_final_value - initial_total_capital) / initial_total_capital
     
     # Sharpe ratio calculation
     portfolio_df = portfolio_df.with_columns([
@@ -432,12 +432,13 @@ def create_performance_chart(strategy):
         row=1, col=1
     )
     
-    # Buy & hold calculation
+    # Buy & hold calculation - should start with same total value as strategy
+    # Buy & hold assumes taking the initial total capital and buying asset at first price
     first_price = df['price'].iloc[0]
-    initial_asset = strategy.config.initial_asset_holdings
-    initial_cash = strategy.config.initial_capital
-    total_asset = initial_asset + (initial_cash / first_price)
-    buy_hold_values = total_asset * df['price']
+    initial_total_capital = strategy.config.initial_capital
+    # Buy & hold: convert all initial capital to asset at starting price
+    buy_hold_asset_amount = initial_total_capital / first_price
+    buy_hold_values = buy_hold_asset_amount * df['price']
     
     fig.add_trace(
         go.Scatter(x=df['date'], y=buy_hold_values, name='Buy & Hold',
