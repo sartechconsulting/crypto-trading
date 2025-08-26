@@ -251,19 +251,20 @@ class GridTradingStrategy:
 # Grid Trading Configuration
 @dataclass
 class PureGridConfig:
-    """Configuration for pure grid trading strategy"""
+    """Configuration for lookback-based grid trading strategy"""
     asset: str = "ETH"
     initial_capital: float = 5000.0
-    grid_spacing: float = 0.05  # 5% spacing between grid levels
-    buy_amount: float = 0.10  # 10% of available cash per buy
-    sell_amount: float = 0.10  # 10% of holdings per sell
-    num_buy_levels: int = 5  # How many buy levels below current price
-    num_sell_levels: int = 5  # How many sell levels above current price
-    reset_frequency: str = "never"  # never, daily, weekly
+    lookback_days: int = 7  # Days to look back for high/low
+    breakout_thresholds: List[float] = None  # [5%, 10%, 15%] breakout levels
+    trade_multiplier: float = 1.0  # Multiplier for trade amounts (1.0 = trade the breakout %)
     transaction_fee: float = 0.001  # 0.1% fee per trade
+    
+    def __post_init__(self):
+        if self.breakout_thresholds is None:
+            self.breakout_thresholds = [0.05, 0.10, 0.15]  # 5%, 10%, 15%
 
 class PureGridStrategy:
-    """Pure grid trading strategy implementation"""
+    """Lookback-based grid trading strategy implementation"""
     
     def __init__(self, config: PureGridConfig, starting_price: float = None):
         self.config = config
@@ -278,48 +279,50 @@ class PureGridStrategy:
         
         self.trade_history: List[dict] = []
         self.portfolio_history: List[dict] = []
-        self.last_trade_price = starting_price or 0.0
-        self.active_buy_levels: List[float] = []
-        self.active_sell_levels: List[float] = []
+        self.price_history: List[float] = []  # Track price history for lookback
+    
+    def get_lookback_range(self, current_day_index: int) -> tuple:
+        """Get high and low from lookback period"""
+        if current_day_index < self.config.lookback_days:
+            # Not enough history, use all available data
+            lookback_prices = self.price_history
+        else:
+            # Use lookback_days of history (excluding today)
+            start_idx = max(0, current_day_index - self.config.lookback_days)
+            end_idx = current_day_index  # Exclude current day
+            lookback_prices = self.price_history[start_idx:end_idx]
         
-        # Initialize grid levels
-        if starting_price:
-            self._update_grid_levels(starting_price)
+        if not lookback_prices:
+            return None, None
+            
+        return max(lookback_prices), min(lookback_prices)
     
-    def _update_grid_levels(self, current_price: float):
-        """Update active buy and sell grid levels"""
-        self.active_buy_levels = []
-        self.active_sell_levels = []
+    def calculate_trade_amount(self, current_price: float, recent_high: float, recent_low: float) -> tuple:
+        """Calculate if we should trade and how much"""
+        if recent_high is None or recent_low is None:
+            return None, 0.0
         
-        # Create buy levels below current price
-        for i in range(1, self.config.num_buy_levels + 1):
-            buy_level = current_price * (1 - i * self.config.grid_spacing)
-            self.active_buy_levels.append(buy_level)
+        # Check for buy signals (price below recent low)
+        for threshold in sorted(self.config.breakout_thresholds, reverse=True):  # Check largest first
+            breakout_price = recent_low * (1 - threshold)
+            if current_price <= breakout_price:
+                trade_amount = threshold * self.config.trade_multiplier
+                return "buy", min(trade_amount, 0.5)  # Cap at 50% of cash
         
-        # Create sell levels above current price
-        for i in range(1, self.config.num_sell_levels + 1):
-            sell_level = current_price * (1 + i * self.config.grid_spacing)
-            self.active_sell_levels.append(sell_level)
+        # Check for sell signals (price above recent high)  
+        for threshold in sorted(self.config.breakout_thresholds, reverse=True):  # Check largest first
+            breakout_price = recent_high * (1 + threshold)
+            if current_price >= breakout_price:
+                trade_amount = threshold * self.config.trade_multiplier
+                return "sell", min(trade_amount, 0.5)  # Cap at 50% of holdings
+        
+        return None, 0.0
     
-    def should_execute_buy(self, current_price: float) -> bool:
-        """Check if current price hits any buy level"""
-        for level in self.active_buy_levels:
-            if current_price <= level:
-                return True
-        return False
-    
-    def should_execute_sell(self, current_price: float) -> bool:
-        """Check if current price hits any sell level"""
-        for level in self.active_sell_levels:
-            if current_price >= level:
-                return True
-        return False
-    
-    def execute_grid_trade(self, price: float, action: str) -> bool:
-        """Execute a grid trade (buy or sell)"""
+    def execute_trade(self, price: float, action: str, trade_percentage: float, reason: str) -> bool:
+        """Execute a trade with specified percentage"""
         if action == "buy" and self.state.cash > 0:
             # Buy with percentage of available cash
-            amount_to_spend = self.state.cash * self.config.buy_amount
+            amount_to_spend = self.state.cash * trade_percentage
             fee = amount_to_spend * self.config.transaction_fee
             net_amount = amount_to_spend - fee
             asset_amount = net_amount / price
@@ -337,7 +340,7 @@ class PureGridStrategy:
                     "price": price,
                     "value": net_amount,
                     "fee": fee,
-                    "reason": f"Grid buy at ${price:.2f}",
+                    "reason": reason,
                     "cash_before": self.state.cash + amount_to_spend,
                     "asset_before": self.state.asset_holdings - asset_amount,
                     "cash_after": self.state.cash,
@@ -347,7 +350,7 @@ class PureGridStrategy:
                 
         elif action == "sell" and self.state.asset_holdings > 0:
             # Sell percentage of current holdings
-            asset_amount = self.state.asset_holdings * self.config.sell_amount
+            asset_amount = self.state.asset_holdings * trade_percentage
             gross_amount = asset_amount * price
             fee = gross_amount * self.config.transaction_fee
             net_amount = gross_amount - fee
@@ -365,7 +368,7 @@ class PureGridStrategy:
                     "price": price,
                     "value": net_amount,
                     "fee": fee,
-                    "reason": f"Grid sell at ${price:.2f}",
+                    "reason": reason,
                     "cash_before": self.state.cash - net_amount,
                     "asset_before": self.state.asset_holdings + asset_amount,
                     "cash_after": self.state.cash,
@@ -376,21 +379,25 @@ class PureGridStrategy:
         return False
     
     def process_price_update(self, date: str, price: float) -> None:
-        """Process daily price update and execute grid trades"""
-        # Check for grid trades
-        executed_trade = False
+        """Process daily price update using lookback-based trading"""
+        # Add price to history
+        self.price_history.append(price)
+        current_day_index = len(self.price_history) - 1
         
-        if self.should_execute_buy(price):
-            if self.execute_grid_trade(price, "buy"):
-                executed_trade = True
-                # Update grid levels after buy
-                self._update_grid_levels(price)
+        # Get lookback range
+        recent_high, recent_low = self.get_lookback_range(current_day_index)
         
-        elif self.should_execute_sell(price):
-            if self.execute_grid_trade(price, "sell"):
-                executed_trade = True
-                # Update grid levels after sell
-                self._update_grid_levels(price)
+        # Check for trading opportunities
+        action, trade_percentage = self.calculate_trade_amount(price, recent_high, recent_low)
+        
+        if action and trade_percentage > 0:
+            # Create descriptive reason
+            if action == "buy":
+                reason = f"Lookback buy: ${price:.2f} is {((recent_low - price) / recent_low * 100):.1f}% below recent low ${recent_low:.2f}"
+            else:
+                reason = f"Lookback sell: ${price:.2f} is {((price - recent_high) / recent_high * 100):.1f}% above recent high ${recent_high:.2f}"
+            
+            self.execute_trade(price, action, trade_percentage, reason)
         
         # Update portfolio state
         asset_value = self.state.asset_holdings * price
@@ -484,7 +491,7 @@ def run_backtest(
     price_range_low, price_range_high, num_grids, volatility_threshold, 
     max_position_size, min_position_size, target_allocation, rebalance_threshold,
     # Grid trading params  
-    grid_spacing, buy_amount, sell_amount, num_buy_levels, num_sell_levels,
+    lookback_days, breakout_thresholds, trade_multiplier,
     # Common params
     transaction_fee, start_date, end_date
 ):
@@ -509,11 +516,9 @@ def run_backtest(
         config = PureGridConfig(
             asset=asset,
             initial_capital=initial_capital,
-            grid_spacing=grid_spacing,
-            buy_amount=buy_amount,
-            sell_amount=sell_amount,
-            num_buy_levels=int(num_buy_levels),
-            num_sell_levels=int(num_sell_levels),
+            lookback_days=int(lookback_days),
+            breakout_thresholds=breakout_thresholds,
+            trade_multiplier=trade_multiplier,
             transaction_fee=transaction_fee
         )
     
@@ -652,8 +657,17 @@ def create_performance_chart(strategy):
     )
     
     # Asset Allocation %
+    # Handle different column names and calculate if missing
+    if 'asset_allocation' in df.columns:
+        allocation_data = df['asset_allocation'] * 100
+    elif 'eth_allocation' in df.columns:
+        allocation_data = df['eth_allocation'] * 100
+    else:
+        # Calculate allocation on the fly if column is missing
+        allocation_data = (df['asset_value'] / df['total_value'] * 100).fillna(0)
+    
     fig.add_trace(
-        go.Scatter(x=df['date'], y=df['asset_allocation'] * 100, name=f'{strategy.config.asset} %',
+        go.Scatter(x=df['date'], y=allocation_data, name=f'{strategy.config.asset} %',
                   line=dict(color='purple', width=2)),
         row=2, col=2
     )
@@ -702,38 +716,39 @@ def main():
             help=f"Percentage of portfolio value to hold in {selected_asset}"
         ) / 100.0
     else:  # Grid Trading Strategy
-        st.sidebar.subheader("📊 Grid Trading Settings")
+        st.sidebar.subheader("📊 Lookback Trading Settings")
         target_allocation = 0.0  # Not used in grid trading
         
-        grid_spacing = st.sidebar.slider(
-            "Grid Spacing (%)", 
-            min_value=1, max_value=20, value=5, step=1,
-            help="Percentage spacing between grid levels"
+        lookback_days = st.sidebar.number_input(
+            "Lookback Days", 
+            min_value=3, max_value=30, value=7,
+            help="Days to look back for high/low calculation"
+        )
+        
+        trade_multiplier = st.sidebar.slider(
+            "Trade Multiplier", 
+            min_value=0.5, max_value=3.0, value=1.0, step=0.1,
+            help="Multiplier for trade amounts (1.0 = trade the breakout percentage)"
+        )
+        
+        # Breakout thresholds
+        st.sidebar.write("**Breakout Thresholds:**")
+        threshold_1 = st.sidebar.slider(
+            "Threshold 1 (%)", min_value=1, max_value=20, value=5, step=1,
+            help="First breakout level"
         ) / 100.0
         
-        buy_amount = st.sidebar.slider(
-            "Buy Amount (% of cash)", 
-            min_value=5, max_value=50, value=10, step=5,
-            help="Percentage of available cash to spend on each buy trigger"
+        threshold_2 = st.sidebar.slider(
+            "Threshold 2 (%)", min_value=1, max_value=20, value=10, step=1,
+            help="Second breakout level"
         ) / 100.0
         
-        sell_amount = st.sidebar.slider(
-            "Sell Amount (% of holdings)", 
-            min_value=5, max_value=50, value=10, step=5,
-            help="Percentage of current holdings to sell on each sell trigger"
+        threshold_3 = st.sidebar.slider(
+            "Threshold 3 (%)", min_value=1, max_value=20, value=15, step=1,
+            help="Third breakout level"
         ) / 100.0
         
-        col1, col2 = st.sidebar.columns(2)
-        with col1:
-            num_buy_levels = st.sidebar.number_input(
-                "Buy Levels", min_value=1, max_value=10, value=5,
-                help="Number of buy levels below current price"
-            )
-        with col2:
-            num_sell_levels = st.sidebar.number_input(
-                "Sell Levels", min_value=1, max_value=10, value=5,
-                help="Number of sell levels above current price"
-            )
+        breakout_thresholds = [threshold_1, threshold_2, threshold_3]
     
     # Dynamic defaults based on asset
     if selected_asset == "BTC":
@@ -760,11 +775,11 @@ def main():
         )
     else:  # Grid Trading Strategy
         st.sidebar.info(
-            f"📊 **Grid Trading Strategy**\n\n"
+            f"📊 **Lookback Trading Strategy**\n\n"
             f"• Start with 100% cash\n"
-            f"• Buy {buy_amount:.0%} of cash when price drops {grid_spacing:.0%}\n"
-            f"• Sell {sell_amount:.0%} of holdings when price rises {grid_spacing:.0%}\n"
-            f"• {num_buy_levels} buy levels, {num_sell_levels} sell levels"
+            f"• Look back {lookback_days} days for high/low\n"
+            f"• Trade {threshold_1:.0%}/{threshold_2:.0%}/{threshold_3:.0%} on breakouts\n"
+            f"• Multiplier: {trade_multiplier}x"
         )
     
     # Common settings for both strategies
@@ -807,7 +822,7 @@ def main():
             "Number of Grid Levels", min_value=10, max_value=50, value=20, step=5
         )
     else:
-        # Grid Trading doesn't need these settings
+        # Grid Trading doesn't need these settings - set defaults
         price_range_low = 0
         price_range_high = 0  
         volatility_threshold = 0
@@ -815,6 +830,12 @@ def main():
         min_position_size = 0
         rebalance_threshold = 0
         num_grids = 0
+        # Set defaults for missing grid parameters 
+        grid_spacing = 0.05
+        buy_amount = 0.1
+        sell_amount = 0.1
+        num_buy_levels = 5
+        num_sell_levels = 5
     
     # Date Range Settings
     st.sidebar.subheader("📅 Date Range")
@@ -873,9 +894,9 @@ def main():
             try:
                 # Set grid trading parameters with defaults if not defined
                 if strategy_type == "Grid Trading Strategy":
-                    grid_params = (grid_spacing, buy_amount, sell_amount, num_buy_levels, num_sell_levels)
+                    grid_params = (lookback_days, breakout_thresholds, trade_multiplier)
                 else:
-                    grid_params = (0.05, 0.1, 0.1, 5, 5)  # Default values for rebalancing strategy
+                    grid_params = (7, [0.05, 0.10, 0.15], 1.0)  # Default values for rebalancing strategy
                 
                 strategy, metrics, config = run_backtest(
                     strategy_type, selected_asset, initial_capital, 
