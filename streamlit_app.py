@@ -44,8 +44,9 @@ st.markdown("""
 @dataclass
 class GridTradingConfig:
     """Configuration for grid trading strategy"""
+    asset: str = "ETH"
     initial_capital: float = 5000.0
-    initial_eth_holdings: float = 0.0
+    initial_asset_holdings: float = 0.0
     price_range_low: float = 3000.0
     price_range_high: float = 10000.0
     num_grids: int = 20
@@ -60,7 +61,7 @@ class GridTradingConfig:
 class TradingState:
     """Current state of the trading portfolio"""
     cash: float
-    eth_holdings: float
+    asset_holdings: float
     total_value: float
     last_price: float
     trades_executed: int = 0
@@ -73,15 +74,15 @@ class GridTradingStrategy:
         self.config = config
         
         # Calculate initial portfolio value including ETH holdings
-        initial_eth_value = 0.0
-        if config.initial_eth_holdings > 0 and starting_price:
-            initial_eth_value = config.initial_eth_holdings * starting_price
+        initial_asset_value = 0.0
+        if config.initial_asset_holdings > 0 and starting_price:
+            initial_asset_value = config.initial_asset_holdings * starting_price
         
-        total_initial_value = config.initial_capital + initial_eth_value
+        total_initial_value = config.initial_capital + initial_asset_value
         
         self.state = TradingState(
             cash=config.initial_capital,
-            eth_holdings=config.initial_eth_holdings,
+            asset_holdings=config.initial_asset_holdings,
             total_value=total_initial_value,
             last_price=starting_price or 0.0
         )
@@ -112,8 +113,8 @@ class GridTradingStrategy:
         if self.state.total_value <= 0:
             return None
             
-        eth_value = self.state.eth_holdings * current_price
-        current_eth_allocation = eth_value / self.state.total_value
+        asset_value = self.state.asset_holdings * current_price
+        current_eth_allocation = asset_value / self.state.total_value
         
         deviation = abs(current_eth_allocation - self.config.target_allocation)
         
@@ -134,7 +135,7 @@ class GridTradingStrategy:
             
             if total_cost <= self.state.cash:
                 self.state.cash -= total_cost
-                self.state.eth_holdings += amount
+                self.state.asset_holdings += amount
                 self.state.trades_executed += 1
                 self.state.total_fees_paid += fee
                 
@@ -146,18 +147,18 @@ class GridTradingStrategy:
                     "fee": fee,
                     "reason": reason,
                     "cash_after": self.state.cash,
-                    "eth_after": self.state.eth_holdings
+                    "eth_after": self.state.asset_holdings
                 })
                 return True
         
         elif action == "sell":
-            if amount <= self.state.eth_holdings:
+            if amount <= self.state.asset_holdings:
                 proceeds = amount * price
                 fee = proceeds * self.config.transaction_fee
                 net_proceeds = proceeds - fee
                 
                 self.state.cash += net_proceeds
-                self.state.eth_holdings -= amount
+                self.state.asset_holdings -= amount
                 self.state.trades_executed += 1
                 self.state.total_fees_paid += fee
                 
@@ -169,7 +170,7 @@ class GridTradingStrategy:
                     "fee": fee,
                     "reason": reason,
                     "cash_after": self.state.cash,
-                    "eth_after": self.state.eth_holdings
+                    "eth_after": self.state.asset_holdings
                 })
                 return True
         
@@ -181,8 +182,8 @@ class GridTradingStrategy:
             return
             
         # Update total portfolio value
-        eth_value = self.state.eth_holdings * price
-        self.state.total_value = self.state.cash + eth_value
+        asset_value = self.state.asset_holdings * price
+        self.state.total_value = self.state.cash + asset_value
         
         # Check for volatility-based trading
         if self.state.last_price > 0:
@@ -200,7 +201,7 @@ class GridTradingStrategy:
                 
                 elif price_change > 0:  # Price increased
                     position_size = self.calculate_position_size(price, "sell")
-                    amount_to_sell = self.state.eth_holdings * position_size
+                    amount_to_sell = self.state.asset_holdings * position_size
                     if amount_to_sell > 0:
                         self.execute_trade(
                             price, "sell", amount_to_sell,
@@ -210,19 +211,19 @@ class GridTradingStrategy:
         # Check for rebalancing
         rebalance_action = self.should_rebalance(price)
         if rebalance_action:
-            eth_value = self.state.eth_holdings * price
-            target_eth_value = self.state.total_value * self.config.target_allocation
+            asset_value = self.state.asset_holdings * price
+            target_asset_value = self.state.total_value * self.config.target_allocation
             
             if rebalance_action == "buy":
-                amount_to_buy = (target_eth_value - eth_value) / price
+                amount_to_buy = (target_asset_value - asset_value) / price
                 if amount_to_buy > 0 and amount_to_buy * price <= self.state.cash:
                     self.execute_trade(
                         price, "buy", amount_to_buy, "Rebalancing: buy ETH"
                     )
             
             elif rebalance_action == "sell":
-                amount_to_sell = (eth_value - target_eth_value) / price
-                if amount_to_sell > 0 and amount_to_sell <= self.state.eth_holdings:
+                amount_to_sell = (asset_value - target_asset_value) / price
+                if amount_to_sell > 0 and amount_to_sell <= self.state.asset_holdings:
                     self.execute_trade(
                         price, "sell", amount_to_sell, "Rebalancing: sell ETH"
                     )
@@ -232,24 +233,32 @@ class GridTradingStrategy:
             "date": date,
             "price": price,
             "cash": self.state.cash,
-            "eth_holdings": self.state.eth_holdings,
-            "eth_value": eth_value,
+            "asset_holdings": self.state.asset_holdings,
+            "asset_value": asset_value,
             "total_value": self.state.total_value,
-            "eth_allocation": eth_value / self.state.total_value if self.state.total_value > 0 else 0
+            "eth_allocation": asset_value / self.state.total_value if self.state.total_value > 0 else 0
         })
         
         self.state.last_price = price
 
 # Load ETH data
 @st.cache_data
-def load_eth_data():
-    """Load and cache ETH price data"""
+def load_crypto_data(asset: str = "ETH"):
+    """Load and cache cryptocurrency price data"""
+    if asset == "ETH":
+        filename = "eth-prices.csv"
+    elif asset == "BTC":
+        filename = "btc-prices.csv"
+    else:
+        st.error(f"Unsupported asset: {asset}")
+        st.stop()
+    
     # Try different possible paths
     possible_paths = [
-        "data/eth-prices.csv",
-        "./data/eth-prices.csv", 
-        "/mount/src/crypto-trading/data/eth-prices.csv",
-        "crypto-trading/data/eth-prices.csv"
+        f"data/{filename}",
+        f"./data/{filename}", 
+        f"/mount/src/crypto-trading/data/{filename}",
+        f"crypto-trading/data/{filename}"
     ]
     
     data_path = None
@@ -259,42 +268,54 @@ def load_eth_data():
             break
     
     if data_path is None:
-        st.error("Could not find ETH price data file. Please ensure data/eth-prices.csv exists.")
+        st.error(f"Could not find {asset} price data file. Please ensure data/{filename} exists.")
         st.stop()
     
     try:
-        df = pl.read_csv(
-            data_path,
-            separator="\t",
-            has_header=True,
-            schema_overrides={"Value": pl.Float64}
-        )
-        
-        # Clean and process data
-        df = df.filter(pl.col("Value") > 0)  # Remove zero prices
-        df = df.with_columns([
-            pl.col("Date(UTC)").str.strptime(pl.Date, "%m/%d/%y").alias("date"),
-            pl.col("Value").alias("price")
-        ])
+        if asset == "ETH":
+            # ETH format: Date(UTC), UnixTimeStamp, Value (tab-separated)
+            df = pl.read_csv(
+                data_path,
+                separator="\t",
+                has_header=True,
+                schema_overrides={"Value": pl.Float64}
+            )
+            # Clean and process data
+            df = df.filter(pl.col("Value") > 0)  # Remove zero prices
+            df = df.with_columns([
+                pl.col("Date(UTC)").str.strptime(pl.Date, "%m/%d/%y").alias("date"),
+                pl.col("Value").alias("price")
+            ])
+            
+        elif asset == "BTC":
+            # BTC format: Date, Close/Last, Volume, Open, High, Low (comma-separated)
+            df = pl.read_csv(data_path, has_header=True)
+            # Clean and process data
+            df = df.with_columns([
+                pl.col("Date").str.strptime(pl.Date, "%m/%d/%Y").alias("date"),
+                pl.col("Close/Last").cast(pl.Float64).alias("price")
+            ])
+            df = df.filter(pl.col("price") > 0)  # Remove zero prices
         
         return df.select(["date", "price"]).sort("date")
         
     except Exception as e:
-        st.error(f"Error loading data file: {str(e)}")
+        st.error(f"Error loading {asset} data file: {str(e)}")
         st.stop()
 
 # Run backtest
 @st.cache_data
 def run_backtest(
-    initial_capital, initial_eth_holdings, price_range_low, price_range_high,
+    asset, initial_capital, initial_asset_holdings, price_range_low, price_range_high,
     num_grids, volatility_threshold, max_position_size, min_position_size,
     target_allocation, rebalance_threshold, transaction_fee,
     start_date, end_date
 ):
     """Run backtest with caching for better performance"""
     config = GridTradingConfig(
+        asset=asset,
         initial_capital=initial_capital,
-        initial_eth_holdings=initial_eth_holdings,
+        initial_asset_holdings=initial_asset_holdings,
         price_range_low=price_range_low,
         price_range_high=price_range_high,
         num_grids=num_grids,
@@ -307,7 +328,7 @@ def run_backtest(
     )
     
     # Load and filter data
-    df = load_eth_data()
+    df = load_crypto_data(asset)
     
     if start_date:
         start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -338,8 +359,8 @@ def run_backtest(
     first_price = portfolio_df["price"][0]
     last_price = portfolio_df["price"][-1]
     initial_cash = strategy.config.initial_capital
-    initial_eth = strategy.config.initial_eth_holdings
-    total_eth_if_bought_all = initial_eth + (initial_cash / first_price)
+    initial_asset = strategy.config.initial_asset_holdings
+    total_eth_if_bought_all = initial_asset + (initial_cash / first_price)
     buy_hold_final_value = total_eth_if_bought_all * last_price
     buy_hold_return = (buy_hold_final_value - initial_value) / initial_value
     
@@ -374,7 +395,7 @@ def run_backtest(
         "total_trades": strategy.state.trades_executed,
         "total_fees": strategy.state.total_fees_paid,
         "final_cash": strategy.state.cash,
-        "final_eth": strategy.state.eth_holdings,
+        "final_eth": strategy.state.asset_holdings,
         "final_value": final_value
     }
     
@@ -392,8 +413,8 @@ def create_performance_chart(strategy):
     # Create subplots
     fig = make_subplots(
         rows=2, cols=2,
-        subplot_titles=['Portfolio Value vs Buy & Hold', 'ETH Price', 
-                       'Portfolio Allocation', 'ETH Allocation %'],
+        subplot_titles=['Portfolio Value vs Buy & Hold', f'{strategy.config.asset} Price', 
+                       'Portfolio Allocation', f'{strategy.config.asset} Allocation %'],
         vertical_spacing=0.12
     )
     
@@ -406,10 +427,10 @@ def create_performance_chart(strategy):
     
     # Buy & hold calculation
     first_price = df['price'].iloc[0]
-    initial_eth = strategy.config.initial_eth_holdings
+    initial_asset = strategy.config.initial_asset_holdings
     initial_cash = strategy.config.initial_capital
-    total_eth = initial_eth + (initial_cash / first_price)
-    buy_hold_values = total_eth * df['price']
+    total_asset = initial_asset + (initial_cash / first_price)
+    buy_hold_values = total_asset * df['price']
     
     fig.add_trace(
         go.Scatter(x=df['date'], y=buy_hold_values, name='Buy & Hold',
@@ -417,9 +438,9 @@ def create_performance_chart(strategy):
         row=1, col=1
     )
     
-    # ETH Price
+    # Asset Price
     fig.add_trace(
-        go.Scatter(x=df['date'], y=df['price'], name='ETH Price',
+        go.Scatter(x=df['date'], y=df['price'], name=f'{strategy.config.asset} Price',
                   line=dict(color='blue', width=1)),
         row=1, col=2
     )
@@ -431,7 +452,7 @@ def create_performance_chart(strategy):
         row=2, col=1
     )
     fig.add_trace(
-        go.Scatter(x=df['date'], y=df['eth_value'], name='ETH Value',
+        go.Scatter(x=df['date'], y=df['asset_value'], name='ETH Value',
                   line=dict(color='orange'), fill='tozeroy'),
         row=2, col=1
     )
@@ -459,22 +480,41 @@ def main():
     # Sidebar for configuration
     st.sidebar.header("⚙️ Strategy Configuration")
     
+    # Asset Selection
+    st.sidebar.subheader("🪙 Asset Selection")
+    selected_asset = st.sidebar.selectbox(
+        "Choose Cryptocurrency",
+        ["ETH", "BTC"],
+        index=0,
+        help="Select the cryptocurrency for backtesting"
+    )
+    
+    # Dynamic defaults based on asset
+    if selected_asset == "BTC":
+        default_low, default_high = 30000, 100000
+        default_holdings = 0.1
+        asset_name = "Bitcoin"
+    else:
+        default_low, default_high = 3000, 10000
+        default_holdings = 2.0
+        asset_name = "Ethereum"
+    
     # Portfolio Settings
     st.sidebar.subheader("💰 Portfolio Settings")
     initial_capital = st.sidebar.number_input(
         "Initial Cash ($)", min_value=1000, max_value=100000, value=5000, step=1000
     )
-    initial_eth_holdings = st.sidebar.number_input(
-        "Initial ETH Holdings", min_value=0.0, max_value=50.0, value=2.0, step=0.5
+    initial_asset_holdings = st.sidebar.number_input(
+        f"Initial {selected_asset} Holdings", min_value=0.0, max_value=50.0, value=default_holdings, step=0.1
     )
     
     # Price Range Settings  
     st.sidebar.subheader("📊 Price Range Settings")
     price_range_low = st.sidebar.number_input(
-        "Price Range Low ($)", min_value=500, max_value=5000, value=3000, step=100
+        "Price Range Low ($)", min_value=500, max_value=50000, value=default_low, step=100
     )
     price_range_high = st.sidebar.number_input(
-        "Price Range High ($)", min_value=5000, max_value=20000, value=10000, step=500
+        "Price Range High ($)", min_value=5000, max_value=200000, value=default_high, step=500
     )
     
     # Trading Settings
@@ -538,7 +578,7 @@ def main():
         with st.spinner("Running backtest..."):
             try:
                 strategy, metrics, config = run_backtest(
-                    initial_capital, initial_eth_holdings, price_range_low, price_range_high,
+                    selected_asset, initial_capital, initial_asset_holdings, price_range_low, price_range_high,
                     num_grids, volatility_threshold, max_position_size, min_position_size,
                     target_allocation, rebalance_threshold, transaction_fee,
                     start_date, end_date
@@ -581,7 +621,7 @@ def main():
         with col6:
             st.metric("Total Trades", f"{metrics['total_trades']:,}")
         with col7:
-            st.metric("Final ETH Holdings", f"{metrics['final_eth']:.3f} ETH")
+            st.metric(f"Final {config.asset} Holdings", f"{metrics['final_asset']:.3f} {config.asset}")
         with col8:
             st.metric("Fees Paid", f"${metrics['total_fees']:,.0f}")
         
