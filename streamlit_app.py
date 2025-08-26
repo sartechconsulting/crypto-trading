@@ -2,7 +2,7 @@
 Streamlit Dashboard for Grid Trading Strategy Analysis
 
 Interactive web app to configure and test grid trading strategies on Ethereum data.
-Run with: streamlit run streamlit_app.py
+Run with: streamlit run streamlit_app_fixed.py
 """
 
 import streamlit as st
@@ -10,15 +10,12 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import pandas as pd
+import numpy as np
 from datetime import datetime, date
-import sys
+import polars as pl
+from dataclasses import dataclass
+from typing import List, Optional
 import os
-
-# Import our trading strategy
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-# Load the method-analysis module directly
-exec(open('method-analysis.py').read())
 
 # Page configuration
 st.set_page_config(
@@ -43,15 +40,252 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Cache the ETH data loading
-@st.cache_data
-def get_eth_data():
-    """Load and cache ETH price data"""
-    return load_eth_data("/Users/jesse/repos/crypto-trading/data/eth-prices.csv")
+# Configuration classes
+@dataclass
+class GridTradingConfig:
+    """Configuration for grid trading strategy"""
+    initial_capital: float = 5000.0
+    initial_eth_holdings: float = 0.0
+    price_range_low: float = 3000.0
+    price_range_high: float = 10000.0
+    num_grids: int = 20
+    volatility_threshold: float = 0.05
+    max_position_size: float = 0.10
+    min_position_size: float = 0.01
+    target_allocation: float = 0.5
+    rebalance_threshold: float = 0.1
+    transaction_fee: float = 0.001
 
-# Cache the backtest computation
+@dataclass
+class TradingState:
+    """Current state of the trading portfolio"""
+    cash: float
+    eth_holdings: float
+    total_value: float
+    last_price: float
+    trades_executed: int = 0
+    total_fees_paid: float = 0.0
+
+class GridTradingStrategy:
+    """Grid trading strategy implementation"""
+    
+    def __init__(self, config: GridTradingConfig, starting_price: float = None):
+        self.config = config
+        
+        # Calculate initial portfolio value including ETH holdings
+        initial_eth_value = 0.0
+        if config.initial_eth_holdings > 0 and starting_price:
+            initial_eth_value = config.initial_eth_holdings * starting_price
+        
+        total_initial_value = config.initial_capital + initial_eth_value
+        
+        self.state = TradingState(
+            cash=config.initial_capital,
+            eth_holdings=config.initial_eth_holdings,
+            total_value=total_initial_value,
+            last_price=starting_price or 0.0
+        )
+        self.trade_history: List[dict] = []
+        self.portfolio_history: List[dict] = []
+    
+    def calculate_position_size(self, price: float, action: str) -> float:
+        """Calculate position size based on price position in range"""
+        price_range = self.config.price_range_high - self.config.price_range_low
+        
+        if action == "buy":
+            distance_from_low = (price - self.config.price_range_low) / price_range
+            intensity = 1.0 - distance_from_low
+            position_size = self.config.min_position_size + (
+                intensity * (self.config.max_position_size - self.config.min_position_size)
+            )
+        else:  # sell
+            distance_from_low = (price - self.config.price_range_low) / price_range
+            intensity = distance_from_low
+            position_size = self.config.min_position_size + (
+                intensity * (self.config.max_position_size - self.config.min_position_size)
+            )
+        
+        return min(position_size, self.config.max_position_size)
+    
+    def should_rebalance(self, current_price: float) -> Optional[str]:
+        """Check if portfolio needs rebalancing based on target allocation"""
+        if self.state.total_value <= 0:
+            return None
+            
+        eth_value = self.state.eth_holdings * current_price
+        current_eth_allocation = eth_value / self.state.total_value
+        
+        deviation = abs(current_eth_allocation - self.config.target_allocation)
+        
+        if deviation > self.config.rebalance_threshold:
+            if current_eth_allocation > self.config.target_allocation:
+                return "sell"
+            else:
+                return "buy"
+        
+        return None
+    
+    def execute_trade(self, price: float, action: str, amount: float, reason: str) -> bool:
+        """Execute a trade and update state"""
+        if action == "buy":
+            cost = amount * price
+            fee = cost * self.config.transaction_fee
+            total_cost = cost + fee
+            
+            if total_cost <= self.state.cash:
+                self.state.cash -= total_cost
+                self.state.eth_holdings += amount
+                self.state.trades_executed += 1
+                self.state.total_fees_paid += fee
+                
+                self.trade_history.append({
+                    "action": "buy",
+                    "price": price,
+                    "amount": amount,
+                    "cost": cost,
+                    "fee": fee,
+                    "reason": reason,
+                    "cash_after": self.state.cash,
+                    "eth_after": self.state.eth_holdings
+                })
+                return True
+        
+        elif action == "sell":
+            if amount <= self.state.eth_holdings:
+                proceeds = amount * price
+                fee = proceeds * self.config.transaction_fee
+                net_proceeds = proceeds - fee
+                
+                self.state.cash += net_proceeds
+                self.state.eth_holdings -= amount
+                self.state.trades_executed += 1
+                self.state.total_fees_paid += fee
+                
+                self.trade_history.append({
+                    "action": "sell",
+                    "price": price,
+                    "amount": amount,
+                    "proceeds": proceeds,
+                    "fee": fee,
+                    "reason": reason,
+                    "cash_after": self.state.cash,
+                    "eth_after": self.state.eth_holdings
+                })
+                return True
+        
+        return False
+    
+    def process_price_update(self, date: str, price: float) -> None:
+        """Process a new price update and make trading decisions"""
+        if price <= 0:
+            return
+            
+        # Update total portfolio value
+        eth_value = self.state.eth_holdings * price
+        self.state.total_value = self.state.cash + eth_value
+        
+        # Check for volatility-based trading
+        if self.state.last_price > 0:
+            price_change = (price - self.state.last_price) / self.state.last_price
+            
+            if abs(price_change) >= self.config.volatility_threshold:
+                if price_change < 0:  # Price dropped
+                    position_size = self.calculate_position_size(price, "buy")
+                    amount_to_buy = (self.state.cash * position_size) / price
+                    if amount_to_buy > 0:
+                        self.execute_trade(
+                            price, "buy", amount_to_buy, 
+                            f"Volatility buy: {price_change:.2%} drop"
+                        )
+                
+                elif price_change > 0:  # Price increased
+                    position_size = self.calculate_position_size(price, "sell")
+                    amount_to_sell = self.state.eth_holdings * position_size
+                    if amount_to_sell > 0:
+                        self.execute_trade(
+                            price, "sell", amount_to_sell,
+                            f"Volatility sell: {price_change:.2%} gain"
+                        )
+        
+        # Check for rebalancing
+        rebalance_action = self.should_rebalance(price)
+        if rebalance_action:
+            eth_value = self.state.eth_holdings * price
+            target_eth_value = self.state.total_value * self.config.target_allocation
+            
+            if rebalance_action == "buy":
+                amount_to_buy = (target_eth_value - eth_value) / price
+                if amount_to_buy > 0 and amount_to_buy * price <= self.state.cash:
+                    self.execute_trade(
+                        price, "buy", amount_to_buy, "Rebalancing: buy ETH"
+                    )
+            
+            elif rebalance_action == "sell":
+                amount_to_sell = (eth_value - target_eth_value) / price
+                if amount_to_sell > 0 and amount_to_sell <= self.state.eth_holdings:
+                    self.execute_trade(
+                        price, "sell", amount_to_sell, "Rebalancing: sell ETH"
+                    )
+        
+        # Record portfolio state
+        self.portfolio_history.append({
+            "date": date,
+            "price": price,
+            "cash": self.state.cash,
+            "eth_holdings": self.state.eth_holdings,
+            "eth_value": eth_value,
+            "total_value": self.state.total_value,
+            "eth_allocation": eth_value / self.state.total_value if self.state.total_value > 0 else 0
+        })
+        
+        self.state.last_price = price
+
+# Load ETH data
 @st.cache_data
-def run_cached_backtest(
+def load_eth_data():
+    """Load and cache ETH price data"""
+    # Try different possible paths
+    possible_paths = [
+        "data/eth-prices.csv",
+        "./data/eth-prices.csv", 
+        "/mount/src/crypto-trading/data/eth-prices.csv",
+        "crypto-trading/data/eth-prices.csv"
+    ]
+    
+    data_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            data_path = path
+            break
+    
+    if data_path is None:
+        st.error("Could not find ETH price data file. Please ensure data/eth-prices.csv exists.")
+        st.stop()
+    
+    try:
+        df = pl.read_csv(
+            data_path,
+            separator="\t",
+            has_header=True,
+            schema_overrides={"Value": pl.Float64}
+        )
+        
+        # Clean and process data
+        df = df.filter(pl.col("Value") > 0)  # Remove zero prices
+        df = df.with_columns([
+            pl.col("Date(UTC)").str.strptime(pl.Date, "%m/%d/%y").alias("date"),
+            pl.col("Value").alias("price")
+        ])
+        
+        return df.select(["date", "price"]).sort("date")
+        
+    except Exception as e:
+        st.error(f"Error loading data file: {str(e)}")
+        st.stop()
+
+# Run backtest
+@st.cache_data
+def run_backtest(
     initial_capital, initial_eth_holdings, price_range_low, price_range_high,
     num_grids, volatility_threshold, max_position_size, min_position_size,
     target_allocation, rebalance_threshold, transaction_fee,
@@ -72,8 +306,77 @@ def run_cached_backtest(
         transaction_fee=transaction_fee
     )
     
-    strategy = run_backtest(config, start_date=start_date, end_date=end_date)
-    metrics = calculate_performance_metrics(strategy)
+    # Load and filter data
+    df = load_eth_data()
+    
+    if start_date:
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+        df = df.filter(pl.col("date") >= start_date_obj)
+    if end_date:
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+        df = df.filter(pl.col("date") <= end_date_obj)
+    
+    if len(df) == 0:
+        raise ValueError("No data available for the specified date range")
+    
+    # Initialize strategy
+    starting_price = df["price"][0]
+    strategy = GridTradingStrategy(config, starting_price=starting_price)
+    
+    # Run simulation
+    for row in df.iter_rows(named=True):
+        strategy.process_price_update(str(row["date"]), row["price"])
+    
+    # Calculate metrics
+    portfolio_df = pl.DataFrame(strategy.portfolio_history)
+    initial_value = portfolio_df["total_value"][0]
+    final_value = strategy.state.total_value
+    
+    total_return = (final_value - initial_value) / initial_value
+    
+    # Buy & hold comparison
+    first_price = portfolio_df["price"][0]
+    last_price = portfolio_df["price"][-1]
+    initial_cash = strategy.config.initial_capital
+    initial_eth = strategy.config.initial_eth_holdings
+    total_eth_if_bought_all = initial_eth + (initial_cash / first_price)
+    buy_hold_final_value = total_eth_if_bought_all * last_price
+    buy_hold_return = (buy_hold_final_value - initial_value) / initial_value
+    
+    # Sharpe ratio calculation
+    portfolio_df = portfolio_df.with_columns([
+        pl.col("total_value").pct_change().alias("daily_return")
+    ])
+    daily_returns = portfolio_df["daily_return"].drop_nulls()
+    
+    if len(daily_returns) > 1:
+        avg_daily_return = daily_returns.mean()
+        std_daily_return = daily_returns.std()
+        sharpe_ratio = (avg_daily_return / std_daily_return) * np.sqrt(365) if std_daily_return > 0 else 0
+    else:
+        sharpe_ratio = 0
+    
+    # Max drawdown
+    portfolio_df = portfolio_df.with_columns([
+        pl.col("total_value").cum_max().alias("peak_value")
+    ])
+    portfolio_df = portfolio_df.with_columns([
+        ((pl.col("total_value") - pl.col("peak_value")) / pl.col("peak_value")).alias("drawdown")
+    ])
+    max_drawdown = portfolio_df["drawdown"].min()
+    
+    metrics = {
+        "total_return": total_return,
+        "buy_hold_return": buy_hold_return,
+        "excess_return": total_return - buy_hold_return,
+        "sharpe_ratio": sharpe_ratio,
+        "max_drawdown": max_drawdown,
+        "total_trades": strategy.state.trades_executed,
+        "total_fees": strategy.state.total_fees_paid,
+        "final_cash": strategy.state.cash,
+        "final_eth": strategy.state.eth_holdings,
+        "final_value": final_value
+    }
     
     return strategy, metrics, config
 
@@ -88,31 +391,25 @@ def create_performance_chart(strategy):
     
     # Create subplots
     fig = make_subplots(
-        rows=3, cols=2,
-        subplot_titles=[
-            'Portfolio Value vs Buy & Hold', 'ETH Price',
-            'Portfolio Allocation (Cash vs ETH)', 'ETH Allocation %',
-            'Daily Returns', 'Cumulative Trades'
-        ],
-        specs=[[{"colspan": 1}, {"colspan": 1}],
-               [{"colspan": 1}, {"colspan": 1}],
-               [{"colspan": 1}, {"colspan": 1}]],
-        vertical_spacing=0.08
+        rows=2, cols=2,
+        subplot_titles=['Portfolio Value vs Buy & Hold', 'ETH Price', 
+                       'Portfolio Allocation', 'ETH Allocation %'],
+        vertical_spacing=0.12
     )
     
-    # 1. Portfolio Value vs Buy & Hold
+    # Portfolio Value vs Buy & Hold
     fig.add_trace(
-        go.Scatter(x=df['date'], y=df['total_value'], name='Strategy Portfolio', 
+        go.Scatter(x=df['date'], y=df['total_value'], name='Strategy', 
                   line=dict(color='green', width=2)),
         row=1, col=1
     )
     
-    # Calculate buy & hold for comparison
+    # Buy & hold calculation
     first_price = df['price'].iloc[0]
     initial_eth = strategy.config.initial_eth_holdings
     initial_cash = strategy.config.initial_capital
-    total_eth_if_bought_all = initial_eth + (initial_cash / first_price)
-    buy_hold_values = total_eth_if_bought_all * df['price']
+    total_eth = initial_eth + (initial_cash / first_price)
+    buy_hold_values = total_eth * df['price']
     
     fig.add_trace(
         go.Scatter(x=df['date'], y=buy_hold_values, name='Buy & Hold',
@@ -120,23 +417,17 @@ def create_performance_chart(strategy):
         row=1, col=1
     )
     
-    # 2. ETH Price
+    # ETH Price
     fig.add_trace(
         go.Scatter(x=df['date'], y=df['price'], name='ETH Price',
                   line=dict(color='blue', width=1)),
         row=1, col=2
     )
     
-    # Add price range lines
-    fig.add_hline(y=strategy.config.price_range_low, line_dash="dot", 
-                  line_color="gray", opacity=0.5, row=1, col=2)
-    fig.add_hline(y=strategy.config.price_range_high, line_dash="dot", 
-                  line_color="gray", opacity=0.5, row=1, col=2)
-    
-    # 3. Portfolio Allocation
+    # Portfolio Allocation
     fig.add_trace(
         go.Scatter(x=df['date'], y=df['cash'], name='Cash',
-                  line=dict(color='lightblue'), fill='tonexty'),
+                  line=dict(color='lightblue'), fill='tozeroy'),
         row=2, col=1
     )
     fig.add_trace(
@@ -145,83 +436,21 @@ def create_performance_chart(strategy):
         row=2, col=1
     )
     
-    # 4. ETH Allocation %
+    # ETH Allocation %
     fig.add_trace(
         go.Scatter(x=df['date'], y=df['eth_allocation'] * 100, name='ETH %',
                   line=dict(color='purple', width=2)),
         row=2, col=2
     )
-    fig.add_hline(y=strategy.config.target_allocation * 100, line_dash="dash",
-                  line_color="gray", opacity=0.7, row=2, col=2)
     
-    # 5. Daily Returns
-    df['daily_return'] = df['total_value'].pct_change() * 100
-    fig.add_trace(
-        go.Scatter(x=df['date'], y=df['daily_return'], name='Daily Return %',
-                  mode='lines', line=dict(color='darkgreen', width=1)),
-        row=3, col=1
-    )
-    fig.add_hline(y=0, line_color="black", opacity=0.3, row=3, col=1)
-    
-    # 6. Cumulative Trades
-    trades_df = pd.DataFrame(strategy.trade_history) if strategy.trade_history else pd.DataFrame()
-    if not trades_df.empty:
-        # Count cumulative trades by date (this is simplified)
-        cumulative_trades = list(range(1, len(trades_df) + 1))
-        # For simplicity, spread trades across time period
-        trade_dates = pd.date_range(df['date'].min(), df['date'].max(), periods=len(trades_df))
-        
-        fig.add_trace(
-            go.Scatter(x=trade_dates, y=cumulative_trades, name='Cumulative Trades',
-                      line=dict(color='brown', width=2)),
-            row=3, col=2
-        )
-    
-    # Update layout
-    fig.update_layout(
-        height=800,
-        showlegend=True,
-        title_text="Grid Trading Strategy Performance Dashboard",
-        title_x=0.5
-    )
-    
-    # Update axes labels
-    fig.update_xaxes(title_text="Date", row=3, col=1)
-    fig.update_xaxes(title_text="Date", row=3, col=2)
-    fig.update_yaxes(title_text="Portfolio Value ($)", row=1, col=1)
-    fig.update_yaxes(title_text="ETH Price ($)", row=1, col=2)
+    fig.update_layout(height=600, showlegend=True, 
+                     title_text="Grid Trading Strategy Performance")
+    fig.update_yaxes(title_text="Value ($)", row=1, col=1)
+    fig.update_yaxes(title_text="Price ($)", row=1, col=2)
     fig.update_yaxes(title_text="Value ($)", row=2, col=1)
-    fig.update_yaxes(title_text="ETH Allocation (%)", row=2, col=2)
-    fig.update_yaxes(title_text="Daily Return (%)", row=3, col=1)
-    fig.update_yaxes(title_text="Cumulative Trades", row=3, col=2)
+    fig.update_yaxes(title_text="Allocation (%)", row=2, col=2)
     
     return fig
-
-def create_trades_table(strategy):
-    """Create a table of recent trades"""
-    if not strategy.trade_history:
-        return pd.DataFrame()
-    
-    trades_df = pd.DataFrame(strategy.trade_history)
-    
-    # Format the trades for display
-    trades_df['formatted_action'] = trades_df['action'].str.upper()
-    trades_df['formatted_amount'] = trades_df['amount'].apply(lambda x: f"{x:.4f} ETH")
-    trades_df['formatted_price'] = trades_df['price'].apply(lambda x: f"${x:,.2f}")
-    
-    if 'cost' in trades_df.columns:
-        trades_df['formatted_value'] = trades_df.apply(
-            lambda row: f"${row.get('cost', row.get('proceeds', 0)):,.2f}", axis=1
-        )
-    else:
-        trades_df['formatted_value'] = trades_df['proceeds'].apply(lambda x: f"${x:,.2f}")
-    
-    # Select and rename columns for display
-    display_df = trades_df[['formatted_action', 'formatted_amount', 'formatted_price', 
-                           'formatted_value', 'reason']].copy()
-    display_df.columns = ['Action', 'Amount', 'Price', 'Value', 'Reason']
-    
-    return display_df.tail(20)  # Show last 20 trades
 
 def main():
     st.title("📈 Grid Trading Strategy Dashboard")
@@ -233,136 +462,88 @@ def main():
     # Portfolio Settings
     st.sidebar.subheader("💰 Portfolio Settings")
     initial_capital = st.sidebar.number_input(
-        "Initial Cash ($)", 
-        min_value=1000, max_value=100000, value=5000, step=1000,
-        help="Starting cash amount"
+        "Initial Cash ($)", min_value=1000, max_value=100000, value=5000, step=1000
     )
     initial_eth_holdings = st.sidebar.number_input(
-        "Initial ETH Holdings", 
-        min_value=0.0, max_value=50.0, value=2.0, step=0.5,
-        help="ETH you already own at strategy start"
+        "Initial ETH Holdings", min_value=0.0, max_value=50.0, value=2.0, step=0.5
     )
     
     # Price Range Settings  
     st.sidebar.subheader("📊 Price Range Settings")
     price_range_low = st.sidebar.number_input(
-        "Price Range Low ($)", 
-        min_value=500, max_value=5000, value=3000, step=100,
-        help="Lower bound for grid trading range"
+        "Price Range Low ($)", min_value=500, max_value=5000, value=3000, step=100
     )
     price_range_high = st.sidebar.number_input(
-        "Price Range High ($)", 
-        min_value=5000, max_value=20000, value=10000, step=500,
-        help="Upper bound for grid trading range"
+        "Price Range High ($)", min_value=5000, max_value=20000, value=10000, step=500
     )
     
     # Trading Settings
     st.sidebar.subheader("⚡ Trading Settings")
     volatility_threshold = st.sidebar.slider(
-        "Volatility Threshold (%)", 
-        min_value=1, max_value=15, value=5, step=1,
-        help="Price change % that triggers trading action"
+        "Volatility Threshold (%)", min_value=1, max_value=15, value=5, step=1
     ) / 100.0
     
     max_position_size = st.sidebar.slider(
-        "Max Position Size (%)", 
-        min_value=1, max_value=25, value=10, step=1,
-        help="Maximum % of cash to use per trade"
+        "Max Position Size (%)", min_value=1, max_value=25, value=10, step=1
     ) / 100.0
     
     min_position_size = st.sidebar.slider(
-        "Min Position Size (%)", 
-        min_value=0.1, max_value=5.0, value=1.0, step=0.1,
-        help="Minimum % of cash to use per trade"
+        "Min Position Size (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1
     ) / 100.0
     
     # Allocation Settings
     st.sidebar.subheader("⚖️ Allocation Settings")
     target_allocation = st.sidebar.slider(
-        "Target ETH Allocation (%)", 
-        min_value=20, max_value=80, value=50, step=5,
-        help="Target % of portfolio in ETH"
+        "Target ETH Allocation (%)", min_value=20, max_value=80, value=50, step=5
     ) / 100.0
     
     rebalance_threshold = st.sidebar.slider(
-        "Rebalance Threshold (%)", 
-        min_value=5, max_value=25, value=10, step=1,
-        help="Allocation deviation % that triggers rebalancing"
+        "Rebalance Threshold (%)", min_value=5, max_value=25, value=10, step=1
     ) / 100.0
     
     transaction_fee = st.sidebar.slider(
-        "Transaction Fee (%)", 
-        min_value=0.0, max_value=1.0, value=0.1, step=0.05,
-        help="Fee charged per trade"
+        "Transaction Fee (%)", min_value=0.0, max_value=1.0, value=0.1, step=0.05
     ) / 100.0
     
     num_grids = st.sidebar.slider(
-        "Number of Grid Levels", 
-        min_value=10, max_value=50, value=20, step=5,
-        help="Number of price levels in the grid"
+        "Number of Grid Levels", min_value=10, max_value=50, value=20, step=5
     )
     
     # Date Range Settings
     st.sidebar.subheader("📅 Date Range")
     
-    # Get available date range
-    df = get_eth_data()
-    min_date = pd.to_datetime(df['date'].min()).date()
-    max_date = pd.to_datetime(df['date'].max()).date()
-    
-    # Preset date ranges
     preset_ranges = {
-        "Crypto Winter (2018-2020)": (date(2018, 1, 1), date(2020, 12, 31)),
-        "COVID Bull Run (2020-2022)": (date(2020, 3, 1), date(2022, 1, 1)),
-        "Recent Volatility (2022-2024)": (date(2022, 1, 1), date(2024, 12, 31)),
-        "2022 Bear Market": (date(2021, 11, 1), date(2022, 12, 31)),
-        "Full History": (min_date, max_date),
+        "Crypto Winter (2018-2020)": ("2018-01-01", "2020-12-31"),
+        "COVID Bull Run (2020-2022)": ("2020-03-01", "2022-01-01"),
+        "Recent Volatility (2022-2024)": ("2022-01-01", "2024-12-31"),
+        "2022 Bear Market": ("2021-11-01", "2022-12-31"),
         "Custom": None
     }
     
     selected_preset = st.sidebar.selectbox(
-        "Date Range Preset",
-        options=list(preset_ranges.keys()),
-        index=2  # Default to "Recent Volatility"
+        "Date Range Preset", options=list(preset_ranges.keys()), index=2
     )
     
     if preset_ranges[selected_preset]:
         start_date, end_date = preset_ranges[selected_preset]
     else:
-        # Custom date selection
         col1, col2 = st.sidebar.columns(2)
         with col1:
-            start_date = st.date_input(
-                "Start Date", 
-                value=date(2022, 1, 1),
-                min_value=min_date,
-                max_value=max_date
-            )
+            start_date = st.date_input("Start Date", value=date(2022, 1, 1)).strftime("%Y-%m-%d")
         with col2:
-            end_date = st.date_input(
-                "End Date", 
-                value=date(2024, 12, 31),
-                min_value=min_date,
-                max_value=max_date
-            )
+            end_date = st.date_input("End Date", value=date(2024, 12, 31)).strftime("%Y-%m-%d")
     
     # Run Strategy Button
     if st.sidebar.button("🚀 Run Strategy", type="primary", use_container_width=True):
-        # Convert dates to strings
-        start_str = start_date.strftime("%Y-%m-%d")
-        end_str = end_date.strftime("%Y-%m-%d")
-        
-        # Run the backtest
         with st.spinner("Running backtest..."):
             try:
-                strategy, metrics, config = run_cached_backtest(
+                strategy, metrics, config = run_backtest(
                     initial_capital, initial_eth_holdings, price_range_low, price_range_high,
                     num_grids, volatility_threshold, max_position_size, min_position_size,
                     target_allocation, rebalance_threshold, transaction_fee,
-                    start_str, end_str
+                    start_date, end_date
                 )
                 
-                # Store results in session state
                 st.session_state.strategy = strategy
                 st.session_state.metrics = metrics
                 st.session_state.config = config
@@ -384,66 +565,25 @@ def main():
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric(
-                "Total Return",
-                f"{metrics['total_return']:.1%}",
-                help="Overall strategy return"
-            )
-        
+            st.metric("Total Return", f"{metrics['total_return']:.1%}")
         with col2:
             excess_return = metrics['excess_return']
-            st.metric(
-                "Excess Return vs B&H",
-                f"{excess_return:+.1%}",
-                delta=f"{excess_return:.1%}",
-                delta_color="normal" if excess_return > 0 else "inverse",
-                help="Return vs buy and hold strategy"
-            )
-        
+            st.metric("Excess Return vs B&H", f"{excess_return:+.1%}", 
+                     delta=f"{excess_return:.1%}")
         with col3:
-            st.metric(
-                "Sharpe Ratio",
-                f"{metrics['sharpe_ratio']:.2f}",
-                help="Risk-adjusted return measure"
-            )
-        
+            st.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
         with col4:
-            st.metric(
-                "Max Drawdown",
-                f"{metrics['max_drawdown']:.1%}",
-                help="Largest peak-to-trough decline"
-            )
+            st.metric("Max Drawdown", f"{metrics['max_drawdown']:.1%}")
         
-        # Additional metrics
         col5, col6, col7, col8 = st.columns(4)
-        
         with col5:
-            st.metric(
-                "Final Portfolio Value",
-                f"${metrics['final_value']:,.0f}",
-                help="Total portfolio value at end"
-            )
-        
+            st.metric("Final Portfolio", f"${metrics['final_value']:,.0f}")
         with col6:
-            st.metric(
-                "Total Trades",
-                f"{metrics['total_trades']:,}",
-                help="Number of trades executed"
-            )
-        
+            st.metric("Total Trades", f"{metrics['total_trades']:,}")
         with col7:
-            st.metric(
-                "Final ETH Holdings",
-                f"{metrics['final_eth']:.3f} ETH",
-                help="ETH amount at strategy end"
-            )
-        
+            st.metric("Final ETH Holdings", f"{metrics['final_eth']:.3f} ETH")
         with col8:
-            st.metric(
-                "Fees Paid",
-                f"${metrics['total_fees']:,.0f}",
-                help="Total transaction fees"
-            )
+            st.metric("Fees Paid", f"${metrics['total_fees']:,.0f}")
         
         # Performance Chart
         st.header("📈 Performance Visualization")
@@ -451,72 +591,33 @@ def main():
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         
-        # Recent Trades Table
+        # Recent Trades
         st.header("📋 Recent Trades")
-        trades_df = create_trades_table(strategy)
-        if not trades_df.empty:
-            st.dataframe(trades_df, use_container_width=True, hide_index=True)
+        if strategy.trade_history:
+            trades_df = pd.DataFrame(strategy.trade_history[-20:])  # Last 20 trades
+            trades_df['Action'] = trades_df['action'].str.upper()
+            trades_df['Amount'] = trades_df['amount'].apply(lambda x: f"{x:.4f} ETH")
+            trades_df['Price'] = trades_df['price'].apply(lambda x: f"${x:,.2f}")
+            
+            display_df = trades_df[['Action', 'Amount', 'Price', 'reason']].copy()
+            display_df.columns = ['Action', 'Amount', 'Price', 'Reason']
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
         else:
             st.info("No trades executed during this period.")
-        
-        # Configuration Summary
-        with st.expander("⚙️ Configuration Used"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("**Portfolio Settings:**")
-                st.write(f"- Initial Cash: ${config.initial_capital:,.0f}")
-                st.write(f"- Initial ETH: {config.initial_eth_holdings:.2f} ETH")
-                st.write(f"- Price Range: ${config.price_range_low:,.0f} - ${config.price_range_high:,.0f}")
-                
-                st.write("**Trading Settings:**")
-                st.write(f"- Volatility Threshold: {config.volatility_threshold:.1%}")
-                st.write(f"- Position Size: {config.min_position_size:.1%} - {config.max_position_size:.1%}")
-            
-            with col2:
-                st.write("**Allocation Settings:**")
-                st.write(f"- Target ETH Allocation: {config.target_allocation:.1%}")
-                st.write(f"- Rebalance Threshold: {config.rebalance_threshold:.1%}")
-                st.write(f"- Transaction Fee: {config.transaction_fee:.2%}")
-                st.write(f"- Grid Levels: {config.num_grids}")
     
     else:
-        # Initial state - show instructions
+        # Initial state
         st.header("👋 Welcome to the Grid Trading Dashboard!")
-        
         st.markdown("""
         ### 🎯 How to Use:
         1. **Configure your strategy** using the sidebar controls
-        2. **Select a time period** to test (presets available for key market periods)
+        2. **Select a time period** to test
         3. **Click "Run Strategy"** to see the results
         
-        ### 📊 What You'll See:
-        - **Performance metrics** vs buy & hold
-        - **Interactive charts** showing portfolio performance
-        - **Trade history** with reasons for each trade
-        - **Risk-adjusted returns** (Sharpe ratio, max drawdown)
-        
         ### 💡 Tips:
-        - **Crypto Winter (2018-2020)** and **Recent Volatility (2022-2024)** periods show grid trading at its best
-        - **Starting with some ETH** gives more realistic results for existing holders
-        - **Lower volatility thresholds** = more trades but potentially better performance
-        - **Higher target ETH allocation** = more aggressive strategy
-        """)
-        
-        # Show sample configuration
-        st.subheader("📋 Sample Configuration")
-        st.code("""
-        # Conservative Strategy
-        Initial Cash: $5,000
-        Initial ETH: 2.0 ETH
-        Volatility Threshold: 3%
-        Target ETH Allocation: 40%
-        
-        # Aggressive Strategy  
-        Initial Cash: $5,000
-        Initial ETH: 2.0 ETH
-        Volatility Threshold: 7%
-        Target ETH Allocation: 70%
+        - **Crypto Winter (2018-2020)** shows grid trading at its best
+        - **Starting with some ETH** gives more realistic results
+        - **Lower volatility thresholds** = more trades
         """)
 
 if __name__ == "__main__":
