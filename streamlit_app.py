@@ -402,7 +402,7 @@ def run_backtest(
         "total_trades": strategy.state.trades_executed,
         "total_fees": strategy.state.total_fees_paid,
         "final_cash": strategy.state.cash,
-        "final_eth": strategy.state.asset_holdings,
+        "final_asset": strategy.state.asset_holdings,
         "final_value": final_value
     }
     
