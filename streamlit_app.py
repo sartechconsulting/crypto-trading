@@ -121,12 +121,12 @@ class GridTradingStrategy:
             return None
             
         asset_value = self.state.asset_holdings * current_price
-        current_eth_allocation = asset_value / self.state.total_value
+        current_asset_allocation = asset_value / self.state.total_value
         
-        deviation = abs(current_eth_allocation - self.config.target_allocation)
+        deviation = abs(current_asset_allocation - self.config.target_allocation)
         
         if deviation > self.config.rebalance_threshold:
-            if current_eth_allocation > self.config.target_allocation:
+            if current_asset_allocation > self.config.target_allocation:
                 return "sell"
             else:
                 return "buy"
@@ -243,7 +243,7 @@ class GridTradingStrategy:
             "asset_holdings": self.state.asset_holdings,
             "asset_value": asset_value,
             "total_value": self.state.total_value,
-            "eth_allocation": asset_value / self.state.total_value if self.state.total_value > 0 else 0
+            "asset_allocation": asset_value / self.state.total_value if self.state.total_value > 0 else 0
         })
         
         self.state.last_price = price
@@ -408,7 +408,8 @@ class PureGridStrategy:
             "cash": self.state.cash,
             "asset_holdings": self.state.asset_holdings,
             "asset_value": asset_value,
-            "total_value": self.state.total_value
+            "total_value": self.state.total_value,
+            "asset_allocation": asset_value / self.state.total_value if self.state.total_value > 0 else 0
         })
         
         self.state.last_price = price
@@ -645,14 +646,14 @@ def create_performance_chart(strategy):
         row=2, col=1
     )
     fig.add_trace(
-        go.Scatter(x=df['date'], y=df['asset_value'], name='ETH Value',
+        go.Scatter(x=df['date'], y=df['asset_value'], name=f'{strategy.config.asset} Value',
                   line=dict(color='orange'), fill='tozeroy'),
         row=2, col=1
     )
     
-    # ETH Allocation %
+    # Asset Allocation %
     fig.add_trace(
-        go.Scatter(x=df['date'], y=df['eth_allocation'] * 100, name='ETH %',
+        go.Scatter(x=df['date'], y=df['asset_allocation'] * 100, name=f'{strategy.config.asset} %',
                   line=dict(color='purple', width=2)),
         row=2, col=2
     )
